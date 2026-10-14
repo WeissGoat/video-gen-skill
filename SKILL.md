@@ -1,25 +1,36 @@
 ---
 name: video-gen
-description: Use for AI video generation in any project - image-to-video (making a still image, character art or CG move), text-to-video, cutscenes, animated portraits, trailer or placeholder motion, several seed variants to pick from. Drives the user's local H3 Studio, which runs MiniMax H3 ComfyUI workflows on a Modal GPU or another ComfyUI. Covers checking Studio, choosing a workflow or one of the user's tuned presets, a dry run for count, time and cost before spending GPU credits, submitting, waiting through slow downloads, copying the videos into the project with a record of every parameter, and reviewing frames. H3 prompts themselves are written with the h3-prompt skill.
+description: Use for AI video generation in any project - image-to-video (making a still image, character art or CG move), text-to-video, cutscenes, animated portraits, trailer or placeholder motion, several seed variants to pick from. Drives the user's local H3 Studio (github.com/WeissGoat/h3-studio), which runs MiniMax H3 ComfyUI workflows on a Modal GPU or another ComfyUI; the Studio folder must be given first (--studio or H3_STUDIO_ROOT). Covers locating and starting Studio, choosing a workflow or one of the user's tuned presets, a dry run for count, time and cost before spending GPU credits, submitting, waiting through slow downloads, copying the videos into the project with a record of every parameter, and reviewing frames. H3 prompts themselves are written with the h3-prompt skill.
 ---
 
 # 通用 AI 视频生成
 
-一条路：**查 Studio → 读工程约定 → 选预设或工作流 → 写提示词 → dry-run 报价 → 用户同意后提交 → 等待并取回 → 看帧挑选 → 交给工程入库**。
+一条路：**指定并检查 Studio → 读工程约定 → 选预设或工作流 → 写提示词 → dry-run 报价 → 用户同意后提交 → 等待并取回 → 看帧挑选 → 交给工程入库**。
 
-后端是用户本机的 **H3 Studio**（默认 `http://127.0.0.1:53290`，随开机启动）。Studio 负责把 ComfyUI 工作流转成 API、提交到云端或本地 ComfyUI、下载视频并记下全部参数。本 skill 只通过它的 HTTP 接口工作，脚本是 `<skill>/scripts/video.mjs`（Node 18+，无依赖）。
+后端是用户本机的 **H3 Studio**（[WeissGoat/h3-studio](https://github.com/WeissGoat/h3-studio)，私有仓库）。Studio 负责把 ComfyUI 工作流转成 API、提交到云端或本地 ComfyUI、下载视频并记下全部参数。本 skill 只通过它的 HTTP 接口（默认 `http://127.0.0.1:53290`）工作，脚本是 `<skill>/scripts/video.mjs`（Node 18+，无依赖）。
 
-## 0. 查 Studio（每个会话第一次生成前）
+## 0. 指定 Studio 目录，检查它（每个会话第一次生成前）
+
+所有命令都要知道 Studio 的目录。按顺序找：
+
+1. 项目 `AGENTS.md` / `CLAUDE.md` 的 video-gen 一节写了 Studio 路径：每条命令加 `--studio <目录>`；
+2. 用户环境变量 `H3_STUDIO_ROOT`；
+3. 都没有：**问用户 Studio 在哪**，不要自己在磁盘上搜。用户确认后，可以建议用户运行 `setx H3_STUDIO_ROOT <目录>` 设一次，或写进项目约定。
+
+只有 Studio 在另一台机器上时，才可以只设 `H3_STUDIO_URL`、不给目录。
 
 ```bash
-node <skill>/scripts/video.mjs status
+node <skill>/scripts/video.mjs status --studio <目录>
 ```
 
 | 结果 | 怎么做 |
 |---|---|
-| 退出码 0 | 记下 target：`Modal 云端批处理` 按 GPU 时间花用户的额度；`ComfyUI 队列` 是本地或别的机器。 |
-| 退出码 2（连不上） | 告诉用户 Studio 没在跑，请用户启动（它的 `scripts/start_server.bat`），或用 `H3_STUDIO_URL` 指到它在的地址。 |
+| 退出码 0 | 记下 target：`Modal 云端批处理` 会按 GPU 时间花用户的额度；`ComfyUI 队列` 是本地或别的机器。 |
+| 退出码 2（没在运行） | 运行 `video.mjs start --studio <目录>`。它在后台启动本机服务，只要 Node，不花钱。 |
+| 退出码 3（没指定目录、目录不对，或端口上跑的是另一个 Studio） | 照提示问用户。用户还没有 Studio 时，它在私有仓库里：clone、填 `local.json` 都先问用户；云端部署（`cloud/README.md`）由用户自己做。 |
 | 退出码 1（没设 ComfyUI 地址 / 缺 object_info） | 请用户在 Studio 设置页处理。Agent 不改 Studio 设置，不运行 `modal deploy/run`。 |
+
+下文的命令都省略了 `--studio <目录>`。设了 `H3_STUDIO_ROOT` 时本来就可以不写。
 
 ## 1. 读工程约定
 

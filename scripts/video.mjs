@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Video generation through a running H3 Studio (ComfyUI workflows on Modal or another
-// ComfyUI). Node 18+, no dependencies.
+// Video generation through H3 Studio (ComfyUI workflows on Modal or another ComfyUI).
+// Node 18+, no dependencies. Every command needs Studio's folder: --studio <dir> or the
+// H3_STUDIO_ROOT environment variable (only H3_STUDIO_URL is enough for a Studio on
+// another machine).
 //
 //   node video.mjs status
+//   node video.mjs start                                  # start Studio in the background
 //   node video.mjs workflows [--all]
 //   node video.mjs presets
 //   node video.mjs params (--workflow W | --card C)
@@ -14,14 +17,16 @@
 //   node video.mjs cancel <DIR | run.json>
 //
 // H3_STUDIO_URL: where Studio listens (default http://127.0.0.1:53290).
-// Exit codes: 0 ok, 1 bad request or error, 2 Studio not reachable,
+// Exit codes: 0 ok, 1 bad request or error, 2 Studio not running, 3 Studio folder not given or wrong,
 //             4 some videos failed, 5 still running when --timeout-min ran out.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const STUDIO = (process.env.H3_STUDIO_URL ?? 'http://127.0.0.1:53290').replace(/\/+$/, '');
+const STUDIO_REPO = 'https://github.com/WeissGoat/h3-studio';
+let studioRoot = null; // Studio's folder, from --studio or H3_STUDIO_ROOT
 const RUN_PREFIX = 'video_run_';
 const FINAL = ['done', 'failed', 'canceled', 'missing'];
 
@@ -77,6 +82,37 @@ function projectName() {
   return path.basename(process.cwd());
 }
 
+// --- where Studio is -------------------------------------------------------------
+
+const MISSING_HELP = `先告诉我 H3 Studio 在哪：--studio <目录>，或设用户环境变量 H3_STUDIO_ROOT
+（Windows：setx H3_STUDIO_ROOT <目录>），或写在项目 AGENTS.md 的 video-gen 一节里。
+还没有 Studio：它在 ${STUDIO_REPO}（私有仓库，要有权限）。clone 之前先问用户：
+  git clone ${STUDIO_REPO}.git <目录>
+  copy <目录>\\local.example.json <目录>\\local.json   (再填数据目录和工作流目录)
+云端部署见 <目录>/cloud/README.md，由用户自己做。`;
+
+function locateStudio(opts) {
+  const given = opts.studio ?? process.env.H3_STUDIO_ROOT;
+  if (!given) {
+    if (process.env.H3_STUDIO_URL) return null; // a Studio on another machine has no local folder
+    throw new Exit(3, `没有指定 H3 Studio 的目录。\n${MISSING_HELP}`);
+  }
+  const root = path.resolve(given);
+  if (!fs.existsSync(path.join(root, 'server', 'index.mjs'))) throw new Exit(3, `${root} 不是 H3 Studio 的目录（没有 server/index.mjs）。\n${MISSING_HELP}`);
+  return root;
+}
+
+const samePath = (a, b) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+
+/** The running Studio must be the one in the given folder, or videos land in another data folder. */
+async function checkStudio() {
+  const state = await api('/api/state');
+  if (studioRoot && state.root && !samePath(state.root, studioRoot)) {
+    throw new Exit(3, `${STUDIO} 上跑的是另一个 Studio（${state.root}），不是 ${studioRoot}。请用户确认用哪个。`);
+  }
+  return state;
+}
+
 // --- Studio API -----------------------------------------------------------------
 
 async function api(route, { method = 'GET', json, body, headers } = {}) {
@@ -88,8 +124,8 @@ async function api(route, { method = 'GET', json, body, headers } = {}) {
       body: json !== undefined ? JSON.stringify(json) : body,
     });
   } catch (error) {
-    throw new Exit(2, `连不上 H3 Studio（${STUDIO}）：${error.cause?.code ?? error.message}\n` +
-      '它应该随开机启动；没在跑的话请用户启动它（h3-studio/scripts/start_server.bat），或用 H3_STUDIO_URL 指到它在的地址。');
+    throw new Exit(2, `H3 Studio 没在运行（${STUDIO}：${error.cause?.code ?? error.message}）。\n` +
+      (studioRoot ? `启动它：node ${path.basename(process.argv[1])} start --studio "${studioRoot}"（本机服务，不花钱）` : '请用户启动它，或检查 H3_STUDIO_URL。'));
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Exit(1, data.error ?? `HTTP ${response.status} ${route}`);
@@ -153,8 +189,33 @@ async function collect(run, runFile, result, seed) {
 
 // --- commands -------------------------------------------------------------------
 
+async function start() {
+  if (!studioRoot) throw new Exit(3, 'start 要先指定 Studio 的目录（--studio 或 H3_STUDIO_ROOT）');
+  const up = () => fetch(`${STUDIO}/api/state`).then((r) => r.ok, () => false);
+  if (await up()) {
+    await checkStudio();
+    return print(`已经在运行：${STUDIO}`);
+  }
+  // The server needs only Node itself; the web page needs `npm ci && npm run build` once.
+  const log = path.join(studioRoot, 'runtime', 'server.log');
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  const out = fs.openSync(log, 'a');
+  const port = new URL(STUDIO).port || '53290';
+  const child = spawn(process.execPath, ['server/index.mjs', '--port', port], { cwd: studioRoot, detached: true, stdio: ['ignore', out, out], windowsHide: true });
+  child.unref();
+  for (let i = 0; i < 30; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (await up()) {
+      print(`已启动：${STUDIO}（日志 ${log}）`);
+      if (!fs.existsSync(path.join(studioRoot, 'web', 'dist', 'index.html'))) print('网页还没构建，用户要看页面时在 Studio 目录运行 npm ci 和 npm run build；Agent 接口不受影响。');
+      return;
+    }
+  }
+  throw new Exit(2, `Studio 30 秒内没有起来，看日志：${log}`);
+}
+
 async function status() {
-  const state = await api('/api/state');
+  const state = await checkStudio();
   const comfy = await api('/api/comfy/status').catch((e) => ({ state: `unknown (${e.message})` }));
   const { batches = [], downloading = [], queued = [] } = await api('/api/cloud-batches');
   let target = '没有设置 ComfyUI 地址（请用户在 Studio 设置页填写）';
@@ -162,7 +223,8 @@ async function status() {
     const host = new URL(state.config.comfyUrl).host;
     target = state.runMode === 'cloud-batch' ? `Modal 云端批处理（${host}），按 GPU 时间计费` : `ComfyUI 队列（${host}）`;
   }
-  print(`studio:  ${STUDIO}  ok`);
+  print(`studio:  ${STUDIO}  ok  ${state.root ?? ''}`);
+  print(`dirs:    数据 ${state.dataDir} · 工作流 ${state.workflowsDir}`);
   print(`target:  ${target}`);
   print(`gpu:     ${comfy.state}${comfy.busy ? '，正在跑' : ''}`);
   print(`nodes:   ${state.hasObjectInfo ? `object_info 已有（${String(state.objectInfoUpdated).slice(0, 10)}）` : '缺 object_info.json，Studio 还不能转换工作流'}`);
@@ -248,6 +310,7 @@ async function run(opts) {
     image = { file: path.resolve(opts.image), sha256: up.sha256, studioId: up.image.id };
   }
 
+  await checkStudio();
   const res = await api('/api/agent/runs', { method: 'POST', json: body });
   const card = `${res.card.name}${res.card.new ? '（新卡片）' : ''}`;
   if (res.dryRun) {
@@ -261,8 +324,10 @@ async function run(opts) {
   fs.mkdirSync(opts.out, { recursive: true });
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
-  let stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  for (let i = 2; fs.existsSync(path.resolve(opts.out, `${RUN_PREFIX}${stamp}.json`)); i++) stamp = `${stamp.split('-')[0]}-${i}`;
+  const base = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  // A second run in the same second gets "_2", which sorts after the first, so `wait <dir>` finds the newest.
+  let stamp = base;
+  for (let i = 2; fs.existsSync(path.resolve(opts.out, `${RUN_PREFIX}${stamp}.json`)); i++) stamp = `${base}_${i}`;
   const runFile = path.resolve(opts.out, `${RUN_PREFIX}${stamp}.json`);
   const record = {
     stamp,
@@ -333,15 +398,18 @@ async function cancel(opts) {
   print(states.map((s) => `种子 ${s.seed}：${s.state}`).join('\n'));
 }
 
-const COMMANDS = { status, workflows, presets, params, run, wait, cancel };
+const COMMANDS = { status, start, workflows, presets, params, run, wait, cancel };
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!COMMANDS[command]) {
-    print(fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 20).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+    const header = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n');
+    print(header.slice(1, header.findIndex((l) => l.startsWith('import'))).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
     return command ? 1 : 0;
   }
-  await COMMANDS[command](parseArgs(rest));
+  const opts = parseArgs(rest);
+  studioRoot = locateStudio(opts);
+  await COMMANDS[command](opts);
   return 0;
 }
 

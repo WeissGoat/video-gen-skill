@@ -4,7 +4,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/state` | 设置（ComfyUI 地址、每小时价格）、`runMode`（`cloud-batch` = Modal，`queue` = 其他 ComfyUI）、有没有 object_info |
+| GET | `/api/state` | `root`（Studio 目录）、`dataDir`、`workflowsDir`、设置（ComfyUI 地址、每小时价格）、`runMode`（`cloud-batch` = Modal，`queue` = 其他 ComfyUI）、有没有 object_info |
 | GET | `/api/agent/workflows[?all=1]` | 工作流：`needs {image, prompt}`、`defaults {duration, megapixels}`、`switches` |
 | GET | `/api/agent/presets` | 画布上的所有卡片：`id, name, workspace, workflow, note` |
 | GET | `/api/agent/params?workflow=…` 或 `?card=…` | 参数 `fields [{id, label, type, role, switch, value, options, min, max}]` 和开关 `switches [{title, on}]` |
