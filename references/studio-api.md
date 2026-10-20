@@ -13,6 +13,8 @@
 | GET | `/api/agent/jobs?ids=a,b` | 每条的 `state`、`error`、`batch {done, total}`、`downloadSeconds`、`result {id, path, url, seconds}` |
 | POST | `/api/agent/cancel` | `{ids}`；云端的会取消它所在的整批 |
 | GET | `/files/outputs/<文件>` | 视频文件（支持 Range） |
+| GET | `/api/agent/accounts` | Modal 账号：`inUse`、`runMode`、`comfyUrl`、`accounts [{name, workspace, cliDefault, creditsLeftUsd, creditsUsedUsd, billedUsd, monthlyCreditsUsd, error}]`。每个账号查一次 Modal 用量，要几秒 |
+| POST | `/api/agent/account` | `{profile}`：切换在用账号，ComfyUI 地址跟着换成那个账号部署的地址；返回同上。账号没部署时 409 |
 
 `POST /api/agent/runs` 的请求体：
 

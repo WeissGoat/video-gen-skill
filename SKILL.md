@@ -1,6 +1,6 @@
 ---
 name: video-gen
-description: Use for AI video generation in any project - image-to-video (making a still image, character art or CG move), text-to-video, cutscenes, animated portraits, trailer or placeholder motion, several seed variants to pick from. Drives the user's local H3 Studio (github.com/WeissGoat/h3-studio), which runs MiniMax H3 ComfyUI workflows on a Modal GPU or another ComfyUI; the Studio folder must be given first (--studio or H3_STUDIO_ROOT). Covers locating and starting Studio, choosing a workflow or one of the user's tuned presets, a dry run for count, time and cost before spending GPU credits, submitting, waiting through slow downloads, copying the videos into the project with a record of every parameter, and reviewing frames. H3 prompts themselves are written with the h3-prompt skill.
+description: Use for AI video generation in any project - image-to-video (making a still image, character art or CG move), text-to-video, cutscenes, animated portraits, trailer or placeholder motion, several seed variants to pick from. Drives the user's local H3 Studio (github.com/WeissGoat/h3-studio), which runs MiniMax H3 ComfyUI workflows on a Modal GPU or another ComfyUI; the Studio folder must be given first (--studio or H3_STUDIO_ROOT). Covers locating and starting Studio, choosing a workflow or one of the user's tuned presets, a dry run for count, time and cost before spending GPU credits, checking Modal credit and switching to another of the user's Modal accounts when it runs out, submitting, waiting through slow downloads, copying the videos into the project with a record of every parameter, and reviewing frames. H3 prompts themselves are written with the h3-prompt skill.
 ---
 
 # 通用 AI 视频生成
@@ -25,7 +25,7 @@ node <skill>/scripts/video.mjs status --studio <目录>
 
 | 结果 | 怎么做 |
 |---|---|
-| 退出码 0 | 记下 target：`Modal 云端批处理` 会按 GPU 时间花用户的额度；`ComfyUI 队列` 是本地或别的机器。 |
+| 退出码 0 | 记下 target：`Modal 云端批处理` 会按 GPU 时间花用户的额度；`ComfyUI 队列` 是本地或别的机器。Modal 时 `account` 一行是在用账号本月约剩多少额度。 |
 | 退出码 2（没在运行） | 运行 `video.mjs start --studio <目录>`。它在后台启动本机服务，只要 Node，不花钱。 |
 | 退出码 3（没指定目录、目录不对，或端口上跑的是另一个 Studio） | 照提示问用户。用户还没有 Studio 时，它在私有仓库里：clone、填 `local.json` 都先问用户；云端部署（`cloud/README.md`）由用户自己做。 |
 | 退出码 1（没设 ComfyUI 地址 / 缺 object_info） | 请用户在 Studio 设置页处理。Agent 不改 Studio 设置，不运行 `modal deploy/run`。 |
@@ -68,7 +68,24 @@ dry-run 不生成，也不改 Studio 的画布（只把输入图存进 Studio �
 
 - target 是 Modal 时，**把条数、时间、费用告诉用户，等用户同意再去掉 `--dry-run` 正式提交**。工程约定里写了预算的，在预算内可以直接提交，超出仍要问。
 - 预估不含下载时间，只算生成。冷启动约 1.5 分钟；1 MP × 5 秒的视频，每条通常 45–90 秒。网速慢时，每条视频下载要好几分钟。
+- target 是 Modal 时，dry-run 和正式提交都会先查额度（见 4.1），dry-run 输出的第一行就是。
 - 同一工作流、参数、输入图、提示词和种子的组合，只会生成一次：再提交时直接复用已有的视频；如果还在生成，就等那一条，不会重复花钱。想要新变体，就换种子（`--seeds 1,2,3` 或 `--count N --seed-start S`）。
+
+### 4.1 额度和多个 Modal 账号
+
+用户可以在 Studio 里登记多个 Modal 账号（每个账号要用户自己登录、部署、下载模型）。
+
+```bash
+node <skill>/scripts/video.mjs accounts              # 每个账号本月约剩多少，* 是在用的
+node <skill>/scripts/video.mjs accounts --use <账号>  # 切换在用账号
+```
+
+- `run` 提交到 Modal 前会先报价，再查在用账号的额度：约剩额度要够这次的预估费用再加 $1 余量（Modal 的用量数据会晚几小时）。账号已经开始扣真钱（`已开始扣费`）也算不够。
+- 不够、而别的账号够：`run` **自动切到剩得最多的账号**再提交，输出里写着 `已切到 …`。把这件事告诉用户。dry-run 只说会切到哪个，不切。
+- 所有账号都不够：退出码 6，不提交。把列出的各账号余额告诉用户，由用户决定（加账号、等下月额度，或接受扣费）。
+- 用户要固定用某个账号时加 `--no-switch`：不够就退出码 6，不自动切。
+- 切换只影响之后的提交。已经提交的批次记得自己的账号，照常同步和下载。
+- 余额按每月 $30（Starter）估算，是估计值。`读不到用量` 时不检查，照常提交，并告诉用户额度没查到。
 
 ## 5. 提交、等待、取回
 
@@ -89,6 +106,7 @@ node <skill>/scripts/video.mjs cancel <目录>                     # 取消；�
 | 2 | 连不上 Studio |
 | 4 | 有的失败了（逐条列出种子和错误） |
 | 5 | 超时，还在跑 |
+| 6 | Modal 额度不够，没有可切换的账号（或用了 `--no-switch`） |
 
 失败时如实告诉用户哪几条、错误摘要。**不要悄悄换工作流、预设或改参数重试**。换了会改变效果，要先问用户。
 
@@ -110,7 +128,7 @@ python <skill>/scripts/frames.py <目录>/*.mp4 --frames 6 --out <目录>/_sheet
 
 生成出来只代表**有了候选**。选定、入库、在工程里真正用上，各要各的证据，不越级声明。
 
-- 不改 Studio 设置，不删 Studio 里的结果，不运行任何 `modal` 命令。
+- 不改 Studio 设置（唯一例外：用 `accounts --use` 或 `run` 的自动切换来换在用的 Modal 账号），不删 Studio 里的结果，不运行任何 `modal` 命令。加账号、部署、下载模型都由用户做。
 - 不把候选手工覆盖进工程的正式资产目录。入库按工程约定或工程自己的 skill 走。
 - 记录文件（`video_run_*.json`）里有提示词全文和输入图路径。工程不打算公开这些时，确认输出目录被 git 忽略。
 - 直接调 Studio HTTP 接口（不用脚本）的写法见 [studio-api.md](references/studio-api.md)。

@@ -12,13 +12,15 @@
 //   node video.mjs run (--workflow W | --card C) [--image F] (--prompt T | --prompt-file F)
 //                      [--seeds 1,2 | --count N [--seed-start S]] [--duration SEC] [--mp X]
 //                      [--set id=value]... [--on switch]... [--off switch]...
-//                      [--project P] [--name N] --out DIR [--dry-run] [--wait] [--timeout-min M]
+//                      [--project P] [--name N] --out DIR [--dry-run] [--wait] [--timeout-min M] [--no-switch]
+//   node video.mjs accounts [--use NAME]                  # Modal accounts, this month's credit; switch
 //   node video.mjs wait <DIR | run.json> [--timeout-min M] [--interval SEC]
 //   node video.mjs cancel <DIR | run.json>
 //
 // H3_STUDIO_URL: where Studio listens (default http://127.0.0.1:53290).
 // Exit codes: 0 ok, 1 bad request or error, 2 Studio not running, 3 Studio folder not given or wrong,
-//             4 some videos failed, 5 still running when --timeout-min ran out.
+//             4 some videos failed, 5 still running when --timeout-min ran out,
+//             6 not enough Modal credit on any account.
 import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -40,7 +42,7 @@ class Exit extends Error {
 // --- arguments ------------------------------------------------------------------
 
 const REPEATABLE = new Set(['set', 'on', 'off']);
-const FLAGS = new Set(['all', 'dry-run', 'wait', 'json']);
+const FLAGS = new Set(['all', 'dry-run', 'wait', 'json', 'no-switch']);
 
 function parseArgs(argv) {
   const opts = { _: [] };
@@ -187,6 +189,52 @@ async function collect(run, runFile, result, seed) {
   return name;
 }
 
+// --- Modal accounts and credit -------------------------------------------------
+
+// Credit kept back on top of the estimate: Modal's usage figures lag by up to a few hours.
+const CREDIT_MARGIN_USD = 1;
+
+const money = (x) => `$${Number(x).toFixed(2)}`;
+
+/** Accounts as Studio reports them, or null for a Studio without multi-account support. */
+async function accountsInfo() {
+  try {
+    return await api('/api/agent/accounts');
+  } catch (error) {
+    if (error.code === 1 && /no route/.test(error.message)) return null;
+    throw error;
+  }
+}
+
+function describeAccount(a) {
+  if (a.error) return `读不到用量（${a.error.split('\n')[0].slice(0, 120)}）`;
+  const billed = a.billedUsd > 0 ? `，已开始扣费 ${money(a.billedUsd)}` : '';
+  return `约剩 ${money(a.creditsLeftUsd)}（本月已用 ${money(a.creditsUsedUsd)} / ${money(a.monthlyCreditsUsd)}${billed}）`;
+}
+
+/**
+ * Before spending GPU time on Modal: is there enough credit on the account in use?
+ * If not, switch to the account with the most credit that covers it (unless --no-switch).
+ * Returns a line for the user; throws Exit 6 when no account has enough.
+ */
+async function ensureCredit(costUsd, { dryRun, noSwitch }) {
+  const info = await accountsInfo();
+  if (!info || info.runMode !== 'cloud-batch' || !info.accounts.length) return null;
+  const need = (costUsd ?? 0) + CREDIT_MARGIN_USD;
+  const enough = (a) => !a.error && !(a.billedUsd > 0) && a.creditsLeftUsd >= need;
+  const current = info.accounts.find((a) => a.name === info.inUse);
+  if (!current || current.error) return `额度：账号 ${info.inUse ?? '?'} ${current ? describeAccount(current) : '不在账号列表里'}，没有检查`;
+  if (enough(current)) return `额度：账号 ${current.name} ${describeAccount(current)}`;
+  const why = current.billedUsd > 0 ? '已经在扣真钱' : `不够这次的约 ${money(costUsd ?? 0)}（另留 ${money(CREDIT_MARGIN_USD)} 余量）`;
+  const next = info.accounts.filter((a) => a.name !== current.name && enough(a)).sort((a, b) => b.creditsLeftUsd - a.creditsLeftUsd)[0];
+  const list = info.accounts.map((a) => `  ${a.name}${a.name === info.inUse ? ' (在用)' : ''}: ${describeAccount(a)}`).join('\n');
+  if (!next) throw new Exit(6, `Modal 额度不够：账号 ${current.name} ${why}，其他账号也不够。\n${list}\n请用户决定：加账号、等下月额度，或接受扣费。`);
+  if (noSwitch) throw new Exit(6, `Modal 额度不够：账号 ${current.name} ${why}。账号 ${next.name} 够用：video.mjs accounts --use ${next.name}\n${list}`);
+  if (dryRun) return `额度：账号 ${current.name} ${why}；正式提交时会切到 ${next.name}（约剩 ${money(next.creditsLeftUsd)}）`;
+  await api('/api/agent/account', { method: 'POST', json: { profile: next.name } });
+  return `额度：账号 ${current.name} ${why}，已切到 ${next.name}（约剩 ${money(next.creditsLeftUsd)}）`;
+}
+
 // --- commands -------------------------------------------------------------------
 
 async function start() {
@@ -229,6 +277,11 @@ async function status() {
   print(`gpu:     ${comfy.state}${comfy.busy ? '，正在跑' : ''}`);
   print(`nodes:   ${state.hasObjectInfo ? `object_info 已有（${String(state.objectInfoUpdated).slice(0, 10)}）` : '缺 object_info.json，Studio 还不能转换工作流'}`);
   print(`price:   $${state.config.costPerHourUsd}/h（Studio 设置）`);
+  if (state.runMode === 'cloud-batch') {
+    const info = await accountsInfo().catch(() => null);
+    const current = info?.accounts.find((a) => a.name === info.inUse);
+    if (current) print(`account: ${current.name} ${describeAccount(current)}${info.accounts.length > 1 ? `；共 ${info.accounts.length} 个账号（accounts 查看）` : ''}`);
+  }
   const running = batches.filter((b) => b.status === 'running');
   print(`batches: ${running.length} 个在跑；${downloading.length} 条下载中，${queued.length} 条等下载`);
   if (!state.config.comfyUrl || !state.hasObjectInfo) throw new Exit(1, 'Studio 还不能生成，见上');
@@ -311,7 +364,11 @@ async function run(opts) {
   }
 
   await checkStudio();
-  const res = await api('/api/agent/runs', { method: 'POST', json: body });
+  // Price it first (a dry run saves nothing), so a Modal run can check the credit before spending it.
+  const quote = await api('/api/agent/runs', { method: 'POST', json: { ...body, dryRun: true } });
+  const credit = quote.mode === 'cloud-batch' && quote.count ? await ensureCredit(quote.estimate?.costUsd, { dryRun: body.dryRun, noSwitch: opts['no-switch'] }) : null;
+  if (credit) print(credit);
+  const res = body.dryRun ? quote : await api('/api/agent/runs', { method: 'POST', json: body });
   const card = `${res.card.name}${res.card.new ? '（新卡片）' : ''}`;
   if (res.dryRun) {
     print(`dry-run · ${res.workspace} · ${card} · ${res.workflow}`);
@@ -398,7 +455,17 @@ async function cancel(opts) {
   print(states.map((s) => `种子 ${s.seed}：${s.state}`).join('\n'));
 }
 
-const COMMANDS = { status, start, workflows, presets, params, run, wait, cancel };
+async function accounts(opts) {
+  await checkStudio();
+  let info = await accountsInfo();
+  if (!info) throw new Exit(1, '这个 Studio 还不支持多个 Modal 账号（更新 Studio）');
+  if (opts.use) info = await api('/api/agent/account', { method: 'POST', json: { profile: opts.use } });
+  if (opts.json) return print(JSON.stringify(info, null, 2));
+  for (const a of info.accounts) print(`${a.name === info.inUse ? '*' : ' '} ${a.name}${a.workspace !== a.name ? ` (${a.workspace})` : ''}  ${describeAccount(a)}`);
+  print(`在用：${info.inUse ?? '?'}${info.comfyUrl ? ` · ${new URL(info.comfyUrl).host}` : ''}`);
+}
+
+const COMMANDS = { status, start, workflows, presets, params, run, wait, cancel, accounts };
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
