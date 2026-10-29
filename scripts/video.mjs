@@ -9,7 +9,7 @@
 //   node video.mjs workflows [--all]
 //   node video.mjs presets
 //   node video.mjs params (--workflow W | --card C)
-//   node video.mjs run (--workflow W | --card C) [--image F] (--prompt T | --prompt-file F)
+//   node video.mjs run (--workflow W | --card C) [--image F] [--upload F]... (--prompt T | --prompt-file F)
 //                      [--seeds 1,2 | --count N [--seed-start S]] [--duration SEC] [--mp X]
 //                      [--set id=value]... [--on switch]... [--off switch]...
 //                      [--project P] [--name N] --out DIR [--dry-run] [--wait] [--timeout-min M] [--no-switch]
@@ -41,7 +41,7 @@ class Exit extends Error {
 
 // --- arguments ------------------------------------------------------------------
 
-const REPEATABLE = new Set(['set', 'on', 'off']);
+const REPEATABLE = new Set(['set', 'on', 'off', 'upload']);
 const FLAGS = new Set(['all', 'dry-run', 'wait', 'json', 'no-switch']);
 
 function parseArgs(argv) {
@@ -297,7 +297,7 @@ async function workflows(opts) {
     }
     const needs = [w.needs.image && '图', w.needs.prompt && '提示词'].filter(Boolean).join(' + ') || '无输入';
     const d = w.defaults;
-    print(`${w.workflow}\n    输入 ${needs} · 默认 ${d.duration ?? '?'} 秒 · ${d.megapixels ?? '?'} MP`);
+    print(`${w.workflow}${w.chain ? '  [接续：提示词用单独一行 --- 分段，--- 后可写这一段的设置]' : w.chainProblems ? `  [不能接续：${w.chainProblems.join('；')}]` : ''}\n    输入 ${needs} · 默认 ${d.duration ?? '?'} 秒 · ${d.megapixels ?? '?'} MP`);
     if (w.switches.length) print(`    开关：${w.switches.map((s) => `${s.title}${s.on ? '' : '(关)'}`).join('、')}`);
   }
 }
@@ -362,6 +362,21 @@ async function run(opts) {
     body.imageId = up.image.id;
     image = { file: path.resolve(opts.image), sha256: up.sha256, studioId: up.image.id };
   }
+  // Extra images a chain prompt names on its "---" lines ("--- 参考图 2=hero"): uploaded, and the
+  // file name there becomes the image's Studio id.
+  const uploads = [];
+  for (const file of opts.upload ?? []) {
+    if (!fs.existsSync(file)) throw new Exit(1, `找不到图片：${file}`);
+    const up = await uploadImage(file);
+    uploads.push({ file: path.resolve(file), sha256: up.sha256, studioId: up.image.id });
+  }
+  if (uploads.length && body.prompt) {
+    const ids = new Map(uploads.flatMap((u) => {
+      const name = path.basename(u.file).toLowerCase();
+      return [[name, u.studioId], [name.replace(/\.[^.]+$/, ''), u.studioId]];
+    }));
+    body.prompt = body.prompt.replace(/^[ \t]*-{3,}.*$/gm, (line) => line.replace(/([=＝]\s*)([^\s,，;；]+)/g, (m, eq, v) => (ids.has(v.toLowerCase()) ? eq + ids.get(v.toLowerCase()) : m)));
+  }
 
   await checkStudio();
   // Price it first (a dry run saves nothing), so a Modal run can check the credit before spending it.
@@ -373,6 +388,7 @@ async function run(opts) {
   if (res.dryRun) {
     print(`dry-run · ${res.workspace} · ${card} · ${res.workflow}`);
     print(`新生成 ${res.count} 条（种子 ${res.seeds.join(', ') || '—'}）；已有可直接复用 ${res.reused.length} 条；正在生成中可等 ${res.joined.length} 条`);
+    if (res.segments) print(`接续：其中 ${res.segments} 条是分段，按顺序生成，最后一段下载后拼成整条`);
     print(describeEstimate(res.estimate));
     print(res.mode === 'cloud-batch' ? '方式：Modal 云端批处理（花用户的 GPU 额度）' : '方式：ComfyUI 队列');
     return;
@@ -390,7 +406,7 @@ async function run(opts) {
     stamp,
     studio: STUDIO,
     createdAt: new Date().toISOString(),
-    request: { ...body, imageId: undefined, image },
+    request: { ...body, imageId: undefined, image, ...(uploads.length ? { uploads } : {}) },
     workspace: res.workspace,
     card: res.card,
     workflow: res.workflow,
@@ -417,16 +433,24 @@ async function wait(opts) {
   const interval = Math.max(5, Number(opts.interval ?? 30)) * 1000;
   let last = '';
   for (;;) {
-    const open = record.jobs.filter((j) => !FINAL.includes(j.state) || (j.state === 'done' && !j.file));
+    // The last segment of a chain also waits (a few minutes at most) for the joined video.
+    const joinPending = (j) => j.chain && j.chain.index === j.chain.count && !j.joinedFile && j.state === 'done' && Date.now() < (j.joinUntil ?? Infinity);
+    const open = record.jobs.filter((j) => !FINAL.includes(j.state) || (j.state === 'done' && !j.file) || joinPending(j));
     if (open.length) {
       const states = await api(`/api/agent/jobs?ids=${open.map((j) => j.id).join(',')}`);
       for (const s of states) {
         const job = record.jobs.find((j) => j.id === s.id);
         Object.assign(job, { state: s.state, error: s.error });
+        if (s.chain) job.chain = { index: s.chain.index, count: s.chain.count };
         if (s.state === 'done' && s.result && !job.file) {
           job.resultId = s.result.id;
           job.file = await collect(record, runFile, s.result, job.seed);
-          print(`  完成 种子 ${job.seed} -> ${job.file}`);
+          print(`  完成 种子 ${job.seed}${s.chain ? ` 段 ${s.chain.index}/${s.chain.count}` : ''} -> ${job.file}`);
+          if (s.chain && s.chain.index === s.chain.count) job.joinUntil = Date.now() + 5 * 60000;
+        }
+        if (s.chain?.joined && !job.joinedFile) {
+          job.joinedFile = await collect(record, runFile, s.chain.joined, job.seed);
+          print(`  整条 种子 ${job.seed}（${s.chain.count} 段）-> ${job.joinedFile}`);
         }
         if (s.state === 'failed' || s.state === 'missing') print(`  失败 种子 ${job.seed}：${s.error ?? s.state}`);
         if (s.downloadSeconds != null) job.downloadSeconds = s.downloadSeconds;
@@ -437,7 +461,7 @@ async function wait(opts) {
     const summary = `${count('done')}/${record.jobs.length} 完成 · 生成中 ${count('running')} · 排队 ${count('waiting')} · 下载中 ${count('downloading')} · 失败 ${count('failed') + count('missing') + count('canceled')}`;
     if (summary !== last) print(`[${new Date().toLocaleTimeString()}] ${summary}`);
     last = summary;
-    if (record.jobs.every((j) => FINAL.includes(j.state) && (j.state !== 'done' || j.file))) break;
+    if (record.jobs.every((j) => FINAL.includes(j.state) && (j.state !== 'done' || j.file) && !joinPending(j))) break;
     if (Date.now() > deadline) throw new Exit(5, `还没完（${summary}）。之后再运行：node ${path.basename(process.argv[1])} wait "${runFile}"`);
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
