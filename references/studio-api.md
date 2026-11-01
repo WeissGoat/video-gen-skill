@@ -5,9 +5,10 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/state` | `root`（Studio 目录）、`dataDir`、`workflowsDir`、设置（ComfyUI 地址、每小时价格）、`runMode`（`cloud-batch` = Modal，`queue` = 其他 ComfyUI）、有没有 object_info |
-| GET | `/api/agent/workflows[?all=1]` | 工作流：`needs {image, prompt}`、`chain`（接续工作流）、`chainProblems`（有 H3 Motion Context 节点但不能当接续工作流用的原因）、`defaults {duration, megapixels}`、`switches` |
+| GET | `/api/agent/workflows[?all=1]` | 工作流：`needs {image, prompt}`、`chain`（接续工作流）、`chainProblems`（有 H3 Motion Context 节点但不能当接续工作流用的原因）、`defaults {duration, megapixels}`、`switches`、`stateful`（每次提交接着云端上一次的结果，不复用）、`notes`（有没有说明） |
 | GET | `/api/agent/presets` | 画布上的所有卡片：`id, name, workspace, workflow, note` |
 | GET | `/api/agent/params?workflow=…` 或 `?card=…` | 参数 `fields [{id, label, type, role, switch, value, options, min, max}]` 和开关 `switches [{title, on}]` |
+| GET | `/api/agent/widgets?workflow=…` 或 `?card=…` | 全部参数：`notes`（工作流旁的 `<名字>.md`，没有时为 null）、`nodes [{nodeId, node, nodeType, area, off, inputs [{id, input, type, value, options, min, max, role?}]}]`、`groups [{title, on, nodes}]` |
 | POST | `/api/images` | 请求体是图片原始字节，头 `x-filename: <URL 编码的文件名>`；返回 `{id}`，按内容去重 |
 | POST | `/api/agent/runs` | 提交（见下） |
 | GET | `/api/agent/jobs?ids=a,b` | 每条的 `state`、`error`、`batch {done, total}`、`downloadSeconds`、`result {id, path, url, seconds}`、`chain {index, count, joined?}`（接续段；最后一段的 `joined` 是拼好的整条） |
@@ -37,6 +38,8 @@
 
 - `card` 和 `workflow` 二选一；`seeds` 和 `count` + `seedStart` 二选一（都不给就随机一个种子）。
 - 输入图、提示词和种子不能放进 `values`，要用各自的字段传。
+- `values` 可以写 `widgets` 里的任何参数 id，`groups` 可以写任何分组名。面板上原来没有的，提交后会加到这个工作流的面板上。图片参数的值写上传得到的图片 id；图片列表写 id 数组。文字值里的 `{seed}` 会换成每条的种子。
+- `stateful` 的工作流：每条都会新生成，不复用、也不并入正在生成的。
 - dry-run 返回 `{count, seeds, segments, reused, joined, estimate, mode}`，不保存任何东西。`segments` 是其中接续分段的条数。
 - 接续工作流：`prompt` 里用单独一行 `---` 分段，每段一条 job，按顺序放进同一个批次。`---` 后面的 `名字=值`（空格隔开）只改下一段：`种子`、`帧数`、`时长`、`参考图`、参数名、开关名（开 / 关）；图写素材库里的文件名。写错时返回 problems（`第 k 段：…`）。
 - 正式提交返回 `{jobs, reused, batchId, mode, card, workspace}`。`reused` 是同样组合已经有的视频，`jobs` 里包括新建的和正在生成、被并入的。

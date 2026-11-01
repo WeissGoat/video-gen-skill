@@ -9,9 +9,12 @@
 //   node video.mjs workflows [--all]
 //   node video.mjs presets
 //   node video.mjs params (--workflow W | --card C)
+//   node video.mjs widgets (--workflow W | --card C) [--grep TEXT]   # every node parameter and group, and the workflow's notes
 //   node video.mjs run (--workflow W | --card C) [--image F] [--upload F]... (--prompt T | --prompt-file F)
 //                      [--seeds 1,2 | --count N [--seed-start S]] [--duration SEC] [--mp X]
-//                      [--set id=value]... [--on switch]... [--off switch]...
+//                      [--set id=value]... [--on switch|group]... [--off switch|group]...
+//                      (--set id=@a.png uploads the image; id=@a.png,@b.png for an image list;
+//                       {seed} in a text value becomes each video's seed)
 //                      [--project P] [--name N] --out DIR [--dry-run] [--wait] [--timeout-min M] [--no-switch]
 //   node video.mjs accounts [--use NAME]                  # Modal accounts, this month's credit; switch
 //   node video.mjs wait <DIR | run.json> [--timeout-min M] [--interval SEC]
@@ -299,6 +302,8 @@ async function workflows(opts) {
     const d = w.defaults;
     print(`${w.workflow}${w.chain ? '  [接续：提示词用单独一行 --- 分段，--- 后可写这一段的设置]' : w.chainProblems ? `  [不能接续：${w.chainProblems.join('；')}]` : ''}\n    输入 ${needs} · 默认 ${d.duration ?? '?'} 秒 · ${d.megapixels ?? '?'} MP`);
     if (w.switches.length) print(`    开关：${w.switches.map((s) => `${s.title}${s.on ? '' : '(关)'}`).join('、')}`);
+    if (w.stateful) print('    [有状态：每次提交接着云端上一次的结果做下一步，同样的参数也会重新生成]');
+    if (w.notes) print('    [有说明：widgets 命令会显示，先读]');
   }
 }
 
@@ -328,6 +333,57 @@ async function params(opts) {
   for (const s of p.switches) print(`  [${s.on ? 'x' : ' '}] ${s.title}`);
 }
 
+async function widgets(opts) {
+  if (!opts.workflow && !opts.card) throw new Exit(1, 'widgets 要 --workflow 或 --card');
+  const q = opts.card ? `card=${encodeURIComponent(opts.card)}` : `workflow=${encodeURIComponent(opts.workflow)}`;
+  const w = await api(`/api/agent/widgets?${q}`);
+  if (opts.json) return print(JSON.stringify(w, null, 2));
+  const grep = opts.grep?.toLowerCase();
+  if (w.notes && !grep) print(`${w.notes.trim()}\n\n----`);
+  print(w.workflow);
+  const limit = (x) => (x != null && Math.abs(x) < 1e6 ? x : '');
+  let area = undefined;
+  for (const n of w.nodes) {
+    const head = `${n.node} (${n.nodeType})`;
+    const inputs = n.inputs.filter((i) => !grep || `${head} ${n.area ?? ''} ${i.id} ${i.input}`.toLowerCase().includes(grep));
+    if (!inputs.length) continue;
+    if (n.area !== area) print(`[${(area = n.area) ?? '不在分组里'}]`);
+    print(`  ${head}${n.off ? '  (关)' : ''}`);
+    for (const i of inputs) {
+      const value = typeof i.value === 'string' && i.value.length > 60 ? `${i.value.slice(0, 60)}…` : JSON.stringify(i.value);
+      const range = limit(i.min) !== '' || limit(i.max) !== '' ? `  [${limit(i.min)}..${limit(i.max)}]` : '';
+      print(`    ${i.id} = ${value}  ${i.type}${range}${i.role ? `  <${i.role}>` : ''}`);
+      if (i.options && i.type === 'combo') print(`        可选：${i.options.join(' | ')}`);
+    }
+  }
+  if (grep) return;
+  print('分组（--on / --off 分组名）：');
+  for (const g of w.groups) print(`  [${g.on ? 'x' : ' '}] ${g.title}`);
+}
+
+/** --set values: JSON when it parses; "@file" (comma-separated for several) uploads images and becomes their Studio ids. */
+async function setValues(list, uploads) {
+  const values = {};
+  for (const kv of list) {
+    const at = kv.indexOf('=');
+    if (at < 1) throw new Exit(1, `--set 要写成 id=value：${kv}`);
+    const raw = kv.slice(at + 1);
+    if (!raw.startsWith('@')) {
+      values[kv.slice(0, at)] = parseValue(raw);
+      continue;
+    }
+    const ids = [];
+    for (const file of raw.split(',').map((f) => f.trim().replace(/^@/, '')).filter(Boolean)) {
+      if (!fs.existsSync(file)) throw new Exit(1, `找不到图片：${file}`);
+      const up = await uploadImage(file);
+      uploads.push({ file: path.resolve(file), sha256: up.sha256, studioId: up.image.id, for: kv.slice(0, at) });
+      ids.push(up.image.id);
+    }
+    values[kv.slice(0, at)] = raw.includes(',') ? ids : ids[0];
+  }
+  return values;
+}
+
 async function run(opts) {
   if (!opts.out) throw new Exit(1, 'run 要 --out <目录>（视频和记录写在这里）');
   if (!opts.workflow && !opts.card) throw new Exit(1, 'run 要 --workflow 或 --card（workflows / presets 可以列出来）');
@@ -339,11 +395,7 @@ async function run(opts) {
     prompt,
     name: opts.name,
     dryRun: Boolean(opts['dry-run']),
-    values: Object.fromEntries((opts.set ?? []).map((kv) => {
-      const at = kv.indexOf('=');
-      if (at < 1) throw new Exit(1, `--set 要写成 id=value：${kv}`);
-      return [kv.slice(0, at), parseValue(kv.slice(at + 1))];
-    })),
+    values: {},
     groups: Object.fromEntries([...(opts.on ?? []).map((t) => [t, true]), ...(opts.off ?? []).map((t) => [t, false])]),
   };
   if (opts.seeds) body.seeds = opts.seeds.split(',').map((s) => Number(s.trim()));
@@ -365,6 +417,7 @@ async function run(opts) {
   // Extra images a chain prompt names on its "---" lines ("--- 参考图 2=hero"): uploaded, and the
   // file name there becomes the image's Studio id.
   const uploads = [];
+  body.values = await setValues(opts.set ?? [], uploads);
   for (const file of opts.upload ?? []) {
     if (!fs.existsSync(file)) throw new Exit(1, `找不到图片：${file}`);
     const up = await uploadImage(file);
@@ -489,7 +542,7 @@ async function accounts(opts) {
   print(`在用：${info.inUse ?? '?'}${info.comfyUrl ? ` · ${new URL(info.comfyUrl).host}` : ''}`);
 }
 
-const COMMANDS = { status, start, workflows, presets, params, run, wait, cancel, accounts };
+const COMMANDS = { status, start, workflows, presets, params, widgets, run, wait, cancel, accounts };
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
