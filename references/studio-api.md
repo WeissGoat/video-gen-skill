@@ -38,7 +38,8 @@
 
 - `card` 和 `workflow` 二选一；`seeds` 和 `count` + `seedStart` 二选一（都不给就随机一个种子）。
 - 输入图、提示词和种子不能放进 `values`，要用各自的字段传。
-- `values` 可以写 `widgets` 里的任何参数 id，`groups` 可以写任何分组名。面板上原来没有的，提交后会加到这个工作流的面板上。图片参数的值写上传得到的图片 id；图片列表写 id 数组。文字值里的 `{seed}` 会换成每条的种子。
+- `values` 可以写 `widgets` 里的任何参数 id，`groups` 可以写任何分组名。面板上原来没有的，提交后会加到这个工作流的面板上。图片参数的值写上传得到的图片 id；图片列表写 id 数组；`video` 类型的值写上传得到的视频 id（`/api/images` 也收 mp4、webm、mov、mkv）。文字值里的 `{seed}` 会换成每条的种子。
+- `loras` 类型（rgthree Power Lora Loader）的值是列表 `[{lora, strength, on}]`，也可以写成字符串 `"文件@强度,文件@强度"`。字符串以 `+` 开头时加在原有列表后面，否则整个换掉。`lora` 可以只写文件名（不带目录和 `.safetensors`），只要云端没有重名。列表里有开着的 LoRA 时，它所在的分组自动打开，除非 `groups` 里写了这个分组。
 - `stateful` 的工作流：每条都会新生成，不复用、也不并入正在生成的。
 - dry-run 返回 `{count, seeds, segments, reused, joined, estimate, mode}`，不保存任何东西。`segments` 是其中接续分段的条数。
 - 接续工作流：`prompt` 里用单独一行 `---` 分段，每段一条 job，按顺序放进同一个批次。`---` 后面的 `名字=值`（空格隔开）只改下一段：`种子`、`帧数`、`时长`、`参考图`、参数名、开关名（开 / 关）；图写素材库里的文件名。写错时返回 problems（`第 k 段：…`）。

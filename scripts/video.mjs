@@ -345,7 +345,9 @@ async function widgets(opts) {
   let area = undefined;
   for (const n of w.nodes) {
     const head = `${n.node} (${n.nodeType})`;
-    const inputs = n.inputs.filter((i) => !grep || `${head} ${n.area ?? ''} ${i.id} ${i.input}`.toLowerCase().includes(grep));
+    // A LoRA list also shows when --grep matches one of the LoRA files it can take.
+    const fileHits = (i) => (grep && i.type === 'loras' ? i.options.filter((o) => o.toLowerCase().includes(grep)) : []);
+    const inputs = n.inputs.filter((i) => !grep || `${head} ${n.area ?? ''} ${i.id} ${i.input}`.toLowerCase().includes(grep) || fileHits(i).length);
     if (!inputs.length) continue;
     if (n.area !== area) print(`[${(area = n.area) ?? '不在分组里'}]`);
     print(`  ${head}${n.off ? '  (关)' : ''}`);
@@ -354,6 +356,12 @@ async function widgets(opts) {
       const range = limit(i.min) !== '' || limit(i.max) !== '' ? `  [${limit(i.min)}..${limit(i.max)}]` : '';
       print(`    ${i.id} = ${value}  ${i.type}${range}${i.role ? `  <${i.role}>` : ''}`);
       if (i.options && i.type === 'combo') print(`        可选：${i.options.join(' | ')}`);
+      if (i.type === 'loras') {
+        const hits = fileHits(i);
+        if (hits.length) print(`        可选的 LoRA 里有：${hits.join(' | ')}`);
+        else if (i.options.length <= 40) print(`        可选：${i.options.join(' | ')}`);
+        else print(`        云端有 ${i.options.length} 个 LoRA 文件，--grep 关键词 可以找`);
+      }
     }
   }
   if (grep) return;
